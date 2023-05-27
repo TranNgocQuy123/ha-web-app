@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  This is template deploy a high-availability web app 
+
+Parameters:
+  # Paramenters are entirely optional.
+  # but using them will make your cloudformation templates more reusable
+  # use them for things that may change over time, such as instance type,
+  # VPCs and so on.
+  SystemName:
+    Type: String
+    Description: my system by owner
+    Default: Quytn7
+  EnvironmentName:
+    Type: String
+    Description: my environment from Udacity
+  # The Market no support Ubuntu 18, I use Ubuntu 22
+  WebImageId:
+    Type: String
+    Description: Ubuntu 22.04
+  # Instance type from requirement
+  InstanceType:
+    Type: String
+    Description: Instace type for Ec2
+  S3BucketName:
+    Type: String
+    Description: S3 bucket name
+
+Resources:
+  # instace profile contains the IAM Role name(s) that we want to associate to our auto scaling EC2 Servers
+  # never give too much permissions to your EC2 instances! if they get hacked, the permissions get hacked also!
+  # in this example, I create a Role called UdacityS3ReadOnlyC2 and just give it a policy of S3 Read-Only Access
+
+  UdacityS3ReadOnlyEC2:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+  PolicyAccessS3:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: 'EC2AccessS3'
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${S3BucketName}/*'
+          - Action: s3:ListBucket
+            Effect: Allow
+            Resource: !Sub 'arn:aws:s3:::${S3BucketName}'
+      Roles:
+        - !Ref UdacityS3ReadOnlyEC2
+
+  ProfileWithRolesForOurApp:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Roles:
+        - !Ref UdacityS3ReadOnlyEC2
+
+  ELBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The Security group allow http to our load balancer
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-vpc-01
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: The Security group allow acess web app
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-vpc-01
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-vpc-01
+  WebServerLaughConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref WebImageId
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      IamInstanceProfile: !Ref ProfileWithRolesForOurApp
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          echo "Udacity Demo Web Server Up and Running!" > index.html
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-private-subnet-01
+      - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-private-subnet-02
+      MaxSize: 6
+      MinSize: 4
+      LaunchConfigurationName: !Ref WebServerLaughConfig
+      TargetGroupARNs:
+        - !Ref TargetGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-public-subnet-01
+        - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-public-subnet-02
+      SecurityGroups:
+        - !Ref ELBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${EnvironmentName}-alb-01
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      Priority: 1
+      ListenerArn: !Ref Listener
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: Output DNS ALB
+    Value: !Join [ "", ['http://', !GetAtt LoadBalancer.DNSName ]]
+    Export:
+      Name: !Sub ${SystemName}-${EnvironmentName}-alb-01
