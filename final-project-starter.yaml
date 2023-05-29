@@ -151,6 +151,7 @@ Resources:
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
+      Name: quytn7-udacity-alb-01
       Subnets:
         - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-public-subnet-01
         - Fn::ImportValue: !Sub ${SystemName}-${EnvironmentName}-public-subnet-02
